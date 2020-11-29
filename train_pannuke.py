@@ -1,0 +1,257 @@
+""" PanNule Training Script
+This is intended to be a lean and easily modifiable training script that trains the model
+with some of the latest networks and training techniques using catalyst.
+Based on Ross Wightman (https://github.com/rwightman) ImageNet Training Script
+This script was started from an early version of the PyTorch ImageNet example
+(https://github.com/pytorch/examples/tree/master/imagenet)
+NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
+(https://github.com/NVIDIA/apex/tree/master/examples/imagenet)
+"""
+
+import argparse
+import yaml
+import os
+import numpy as np
+import logging
+from datetime import datetime
+import torch
+
+from timm.utils import setup_default_logging
+from src.utils import create_model, create_optimizer, create_criterion, create_callbacks, get_outdir
+from timm.scheduler import create_scheduler
+from src.augmentations import get_training_trasnforms, get_valid_transforms
+from src.datasets import PanNukeDataset
+from torch.utils.data import DataLoader
+from catalyst.dl import SupervisedRunner
+
+torch.backends.cudnn.benchmark = True
+_logger = logging.getLogger('train')
+config_parser = parser = argparse.ArgumentParser(description='Training Config', add_help=False)
+parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
+                    help='YAML config file specifying default arguments')
+parser = argparse.ArgumentParser(description='PyTorch PanNuke Training using Catalyst')
+# Dataset / Model parameters
+parser.add_argument('--model', default='unet', type=str, metavar='MODEL',
+                    help='Name of model to train (default: "unet"')
+parser.add_argument('--encoder', default='resnet18', type=str, metavar='MODEL',
+                    help='Name of encoder (default: "resnet18"')
+parser.add_argument('--pretrained', action='store_true', default=False,
+                    help='Start with pretrained version of specified network (if avail)')
+parser.add_argument('--initial-checkpoint', default='', type=str, metavar='PATH',
+                    help='Initialize model from this checkpoint (default: none)')
+parser.add_argument('--resume', default='', type=str, metavar='PATH',
+                    help='Resume full model and optimizer state from checkpoint (default: none)')
+parser.add_argument('--no-resume-opt', action='store_true', default=False,
+                    help='prevent resume of optimizer state when resuming model')
+parser.add_argument('--num-classes', type=int, default=6, metavar='N',
+                    help='number of label classes (default: 6)')
+parser.add_argument('--data-folder', default='data/PanNuke', type=str,
+                    help='Path to data')
+parser.add_argument('--train-fold', default='1', type=str,
+                    help='train fold idx')
+parser.add_argument('--valid-fold', default='2', type=str,
+                    help='valid fold idx')
+parser.add_argument('-b', '--batch-size', type=int, default=32, metavar='N',
+                    help='input batch size for training (default: 32)')
+parser.add_argument('-vb', '--validation-batch-size-multiplier', type=int, default=1, metavar='N',
+                    help='ratio of validation batch size to training batch size (default: 1)')
+parser.add_argument('--class-names', default='neoplastic,non-neoplastic epithelial,inflammatory,connective,dead,background', type=str,
+                    help='Class names')                    
+# Criterion parametrs
+parser.add_argument('--criterion', default='dice_ce', type=str,
+                    help='Criterion (default: DICE + CE)')
+# Optimizer parameters
+parser.add_argument('--opt', default='sgd', type=str, metavar='OPTIMIZER',
+                    help='Optimizer (default: "sgd"')
+parser.add_argument('--opt-eps', default=None, type=float, metavar='EPSILON',
+                    help='Optimizer Epsilon (default: None, use opt default)')
+parser.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='BETA',
+                    help='Optimizer Betas (default: None, use opt default)')
+parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
+                    help='Optimizer momentum (default: 0.9)')
+parser.add_argument('--weight-decay', type=float, default=0.0001,
+                    help='weight decay (default: 0.0001)')
+parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
+                    help='Clip gradient norm (default: None, no clipping)')
+
+# Learning rate schedule parameters
+parser.add_argument('--sched', default='step', type=str, metavar='SCHEDULER',
+                    help='LR scheduler (default: "step"')
+parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
+                    help='learning rate (default: 0.01)')
+parser.add_argument('--ev', type=float, default=0.1, metavar='LR',
+                    help='multiplier for encoder learning rate (default: 0.1)')
+parser.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct',
+                    help='learning rate noise on/off epoch percentages')
+parser.add_argument('--lr-noise-pct', type=float, default=0.67, metavar='PERCENT',
+                    help='learning rate noise limit percent (default: 0.67)')
+parser.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV',
+                    help='learning rate noise std-dev (default: 1.0)')
+parser.add_argument('--lr-cycle-mul', type=float, default=1.0, metavar='MULT',
+                    help='learning rate cycle len multiplier (default: 1.0)')
+parser.add_argument('--lr-cycle-limit', type=int, default=1, metavar='N',
+                    help='learning rate cycle limit')
+parser.add_argument('--warmup-lr', type=float, default=0.0001, metavar='LR',
+                    help='warmup learning rate (default: 0.0001)')
+parser.add_argument('--min-lr', type=float, default=1e-5, metavar='LR',
+                    help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+parser.add_argument('--epochs', type=int, default=200, metavar='N',
+                    help='number of epochs to train (default: 2)')
+parser.add_argument('--start-epoch', default=None, type=int, metavar='N',
+                    help='manual epoch number (useful on restarts)')
+parser.add_argument('--decay-epochs', type=float, default=30, metavar='N',
+                    help='epoch interval to decay LR')
+parser.add_argument('--warmup-epochs', type=int, default=3, metavar='N',
+                    help='epochs to warmup LR, if scheduler supports')
+parser.add_argument('--cooldown-epochs', type=int, default=10, metavar='N',
+                    help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
+parser.add_argument('--patience-epochs', type=int, default=10, metavar='N',
+                    help='patience epochs for Plateau LR scheduler (default: 10')
+parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
+                    help='LR decay rate (default: 0.1)')
+
+# Augmentation & regularization parameters
+parser.add_argument('--no-aug', action='store_true', default=False,
+                    help='Disable all training augmentation, override other train aug args')
+parser.add_argument('--aug-type', type=str, default='light',
+                    help='Augs type: light, medium, hard')
+# TO DO: add mixup\cutmix
+# parser.add_argument('--mixup', type=float, default=0.0,
+#                     help='mixup alpha, mixup enabled if > 0. (default: 0.)')
+# parser.add_argument('--cutmix', type=float, default=0.0,
+#                     help='cutmix alpha, cutmix enabled if > 0. (default: 0.)')
+# parser.add_argument('--cutmix-minmax', type=float, nargs='+', default=None,
+#                     help='cutmix min/max ratio, overrides alpha and enables cutmix if set (default: None)')
+# parser.add_argument('--mixup-prob', type=float, default=1.0,
+#                     help='Probability of performing mixup or cutmix when either/both is enabled')
+# parser.add_argument('--mixup-switch-prob', type=float, default=0.5,
+#                     help='Probability of switching to cutmix when both mixup and cutmix enabled')
+# parser.add_argument('--mixup-mode', type=str, default='batch',
+#                     help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
+# parser.add_argument('--mixup-off-epoch', default=0, type=int, metavar='N',
+#                     help='Turn off mixup after this epoch, disabled if 0 (default: 0)')
+
+# Misc
+parser.add_argument('--seed', type=int, default=42, metavar='S',
+                    help='random seed (default: 42)')
+parser.add_argument('-j', '--workers', type=int, default=1, metavar='N',
+                    help='how many training processes to use (default: 4)')
+parser.add_argument('--num-gpu', type=int, default=1,
+                    help='Number of GPUS to use')
+parser.add_argument('--apex-amp', action='store_true', default=False,
+                    help='Use NVIDIA Apex AMP mixed precision')
+parser.add_argument('--eval-metric', default='loss', type=str, metavar='EVAL_METRIC',
+                    help='Best metric (default: "loss")')
+parser.add_argument('--output', default='', type=str, metavar='PATH',
+                    help='path to output folder (default: none, current dir)')
+# Catalyst
+parser.add_argument('--input-target-key', default='mask', type=str,
+                    help='Runner input target key (default: "mask")')
+parser.add_argument('--input-key', default='features', type=str,
+                    help='Runner input key (default: "features")')
+
+
+def _parse_args():
+    # Do we have a config file to parse?
+    args_config, remaining = config_parser.parse_known_args()
+    if args_config.config:
+        with open(args_config.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+            parser.set_defaults(**cfg)
+
+    # The main arg parser parses the rest of the args, the usual
+    # defaults will have been overridden if config file specified.
+    args = parser.parse_args(remaining)
+
+    # Cache the args as a text string to save them in the output dir later
+    args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
+    return args, args_text
+
+
+def main():
+    setup_default_logging()
+    args, args_text = _parse_args()
+    args.device = 'cuda:0'
+    args.world_size = 1
+    args.rank = 0  # global rank
+    _logger.info('Training with a single process on %d GPUs.' % args.num_gpu)
+    torch.manual_seed(args.seed + args.rank)
+
+    # prepare model
+    model = create_model(
+        args.model,
+        args.encoder,
+        pretrained=args.pretrained,
+        num_classes=args.num_classes,
+        checkpoint_path=args.initial_checkpoint)
+
+    # prepare optimizer
+    optimizer = create_optimizer(args, model)
+
+    # prepare scheduler
+    lr_scheduler, num_epochs = create_scheduler(args, optimizer)
+    _logger.info('Scheduled epochs: {}'.format(num_epochs))
+
+    # prepare dataset
+    folder = args.data_folder
+    train_fold = args.train_fold
+    images = np.load(f'{folder}/images/fold{train_fold}_images.npy')
+    masks = np.load(f'{folder}/masks/fold{train_fold}_masks.npy')
+    types = np.load(f'{folder}/types/fold{train_fold}_types.npy')
+
+    valid_fold = args.valid_fold
+    images_val = np.load(f'{folder}/images/fold{valid_fold}_images.npy')
+    masks_val = np.load(f'{folder}/masks/fold{valid_fold}_masks.npy')
+    types_val = np.load(f'{folder}/types/fold{valid_fold}_types.npy')
+    if args.no_aug:
+        train_dataset = PanNukeDataset(images, masks, types, get_valid_transforms())
+    else:
+        train_dataset = PanNukeDataset(images, masks, types, get_training_trasnforms(args.aug_type))
+    val_dataset = PanNukeDataset(images_val, masks_val, types_val, get_valid_transforms())
+
+    loaders = {
+        'train': DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True),
+        'valid': DataLoader(
+            val_dataset,
+            batch_size=args.batch_size*args.validation_batch_size_multiplier,
+            shuffle=False)
+    }
+
+    # save config
+    output_dir = ''
+    output_base = args.output if args.output else './logs'
+    exp_name = '-'.join([
+        datetime.now().strftime("%Y%m%d-%H%M%S"),
+        args.model,
+        args.encoder
+    ])
+    output_dir = get_outdir(output_base, 'train', exp_name)
+
+    with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
+        f.write(args_text)
+
+    criterion, criterion_names = create_criterion(args)
+    callbacks = create_callbacks(args, criterion_names)
+    eval_metric = args.eval_metric
+    minimize_metric = True if eval_metric == 'loss' else False
+    runner = SupervisedRunner(input_key=args.input_key, input_target_key=args.input_target_key)
+    runner.train(
+        model=model,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=lr_scheduler,
+        loaders=loaders,
+        callbacks=callbacks,
+        logdir=output_dir,
+        num_epochs=num_epochs,
+        main_metric=eval_metric,
+        minimize_metric=minimize_metric,
+        verbose=True,
+    )
+
+
+if __name__ == '__main__':
+    main()
