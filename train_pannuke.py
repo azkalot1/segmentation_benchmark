@@ -17,8 +17,7 @@ from datetime import datetime
 import torch
 
 from timm.utils import setup_default_logging
-from src.utils import create_model, create_optimizer, create_criterion, create_callbacks, get_outdir
-from timm.scheduler import create_scheduler
+from src.utils import create_model, create_optimizer, create_criterion, create_callbacks, create_scheduler, get_outdir
 from src.augmentations import get_training_trasnforms, get_valid_transforms
 from src.datasets import PanNukeDataset
 from torch.utils.data import DataLoader
@@ -55,7 +54,9 @@ parser.add_argument('-b', '--batch-size', type=int, default=32, metavar='N',
                     help='input batch size for training (default: 32)')
 parser.add_argument('-vb', '--validation-batch-size-multiplier', type=int, default=1, metavar='N',
                     help='ratio of validation batch size to training batch size (default: 1)')
-parser.add_argument('--class-names', default='neoplastic,non-neoplastic epithelial,inflammatory,connective,dead,background', type=str,
+parser.add_argument('--class-names',
+                    default='neoplastic,non-neoplastic epithelial,inflammatory,connective,dead,background', 
+                    type=str,
                     help='Class names')                    
 # Criterion parametrs
 parser.add_argument('--criterion', default='dice_ce', type=str,
@@ -75,18 +76,12 @@ parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
                     help='Clip gradient norm (default: None, no clipping)')
 
 # Learning rate schedule parameters
-parser.add_argument('--sched', default='step', type=str, metavar='SCHEDULER',
-                    help='LR scheduler (default: "step"')
-parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
+parser.add_argument('--sched', default='plateau', type=str, metavar='SCHEDULER',
+                    help='LR scheduler (default: "plateau"')
+parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
                     help='learning rate (default: 0.01)')
 parser.add_argument('--ev', type=float, default=0.1, metavar='LR',
                     help='multiplier for encoder learning rate (default: 0.1)')
-parser.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct',
-                    help='learning rate noise on/off epoch percentages')
-parser.add_argument('--lr-noise-pct', type=float, default=0.67, metavar='PERCENT',
-                    help='learning rate noise limit percent (default: 0.67)')
-parser.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV',
-                    help='learning rate noise std-dev (default: 1.0)')
 parser.add_argument('--lr-cycle-mul', type=float, default=1.0, metavar='MULT',
                     help='learning rate cycle len multiplier (default: 1.0)')
 parser.add_argument('--lr-cycle-limit', type=int, default=1, metavar='N',
@@ -105,10 +100,10 @@ parser.add_argument('--warmup-epochs', type=int, default=3, metavar='N',
                     help='epochs to warmup LR, if scheduler supports')
 parser.add_argument('--cooldown-epochs', type=int, default=10, metavar='N',
                     help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
-parser.add_argument('--patience-epochs', type=int, default=10, metavar='N',
-                    help='patience epochs for Plateau LR scheduler (default: 10')
-parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
-                    help='LR decay rate (default: 0.1)')
+parser.add_argument('--patience-scheduler', type=int, default=5, metavar='N',
+                    help='patience epochs for Plateau LR scheduler (default: 5)')
+parser.add_argument('--factor-scheduler', '--fs', type=float, default=0.1, metavar='N',
+                    help='LR decay for Plateau LR scheduler (default: 0.1)')
 
 # Augmentation & regularization parameters
 parser.add_argument('--no-aug', action='store_true', default=False,
@@ -138,8 +133,8 @@ parser.add_argument('-j', '--workers', type=int, default=1, metavar='N',
                     help='how many training processes to use (default: 4)')
 parser.add_argument('--num-gpu', type=int, default=1,
                     help='Number of GPUS to use')
-parser.add_argument('--apex-amp', action='store_true', default=False,
-                    help='Use NVIDIA Apex AMP mixed precision')
+parser.add_argument('--fp16', action='store_true', default=False,
+                    help='Use mixed precision')
 parser.add_argument('--eval-metric', default='loss', type=str, metavar='EVAL_METRIC',
                     help='Best metric (default: "loss")')
 parser.add_argument('--output', default='', type=str, metavar='PATH',
@@ -149,6 +144,10 @@ parser.add_argument('--input-target-key', default='mask', type=str,
                     help='Runner input target key (default: "mask")')
 parser.add_argument('--input-key', default='features', type=str,
                     help='Runner input key (default: "features")')
+parser.add_argument('--patience', default=10, type=int,
+                    help='Patience for early stopping (default: 10)')
+parser.add_argument('--save-n-best', default=5, type=int,
+                    help='N best epochs to save (default: 5)')
 
 
 def _parse_args():
@@ -226,7 +225,9 @@ def main():
     exp_name = '-'.join([
         datetime.now().strftime("%Y%m%d-%H%M%S"),
         args.model,
-        args.encoder
+        args.encoder,
+        args.aug_type,
+        args.opt.lower()
     ])
     output_dir = get_outdir(output_base, 'train', exp_name)
 
@@ -238,6 +239,13 @@ def main():
     eval_metric = args.eval_metric
     minimize_metric = True if eval_metric == 'loss' else False
     runner = SupervisedRunner(input_key=args.input_key, input_target_key=args.input_target_key)
+    # set fp16
+    if args.fp16:
+        fp16_params = dict(opt_level="O1")  # params for FP16
+        _logger.info('Using fp16 O1')
+    else:
+        fp16_params = None
+        _logger.info('Not using fp16 O1')
     runner.train(
         model=model,
         criterion=criterion,
@@ -250,6 +258,7 @@ def main():
         main_metric=eval_metric,
         minimize_metric=minimize_metric,
         verbose=True,
+        fp16=fp16_params,
     )
 
 

@@ -23,7 +23,7 @@ class PanNukeDataset(Dataset):
         load the image by coordinates
         """
         sample_image = self.images[idx]
-        sample_mask = np.argmax(self.masks[idx].astype(int), axis=2)
+        sample_mask = np.argmax((self.masks[idx] > 0).astype(int), axis=2)
         sample_type = self.types[idx]
         augmented = self.transforms(image=sample_image, mask=sample_mask)
         sample_image = augmented['image']

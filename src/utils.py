@@ -6,8 +6,11 @@ from catalyst.contrib.nn import Adam, AdamW, RAdam, Lookahead, SGD
 from catalyst.utils import process_model_params
 from pytorch_toolbelt.losses import DiceLoss
 import torch.nn as nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from catalyst.dl import CriterionCallback, MetricAggregationCallback
 from pytorch_toolbelt.utils.catalyst import IoUMetricsCallback
+from catalyst.callbacks.checkpoint import CheckpointCallback
+from catalyst.callbacks.early_stop import EarlyStoppingCallback
 _logger = logging.getLogger(__name__)
 
 
@@ -31,12 +34,12 @@ def create_model(
         **: other kwargs are model specific
     """
     # I should probably rewrite it
+    weights = None
     if pretrained:
         weights = 'imagenet'
-    else:
-        weights = None
+        _logger.info('Using pre-trained imagenet weights')
 
-    if model_name == 'unetpluspluts':
+    if model_name == 'unetplusplus':
         model = smp.UnetPlusPlus(
             encoder_name=encoder_name,
             encoder_weights=weights,
@@ -135,6 +138,7 @@ def create_optimizer(args, model, filter_bias_and_bn=True):
 
     if len(opt_split) > 1:
         if opt_split[0] == 'lookahead':
+            _logger.info('Using lookahead')
             optimizer = Lookahead(optimizer)
 
     return optimizer
@@ -181,7 +185,13 @@ def create_callbacks(args, criterion_names):
             mode='multiclass',
             input_key=args.input_target_key,
             class_names=args.class_names.split(',') if args.class_names else None
-        )
+        ),
+        CheckpointCallback(save_n_best=args.save_n_best),
+        EarlyStoppingCallback(
+            patience=args.patience,
+            metric=args.eval_metric,
+            minimize=True if args.eval_metric == 'loss' else False)
+
     ]
     metrics_weights = {}
     for cn in criterion_names:
@@ -189,3 +199,20 @@ def create_callbacks(args, criterion_names):
         metrics_weights[f'loss_{cn}'] = 1.0
     callbacks.append(MetricAggregationCallback(prefix="loss", mode="weighted_sum", metrics=metrics_weights))
     return callbacks
+
+
+def create_scheduler(args, optimizer):
+    num_epochs = args.epochs
+    lr_scheduler = None
+    if args.sched == 'plateau':
+        mode = 'min' if 'loss' in getattr(args, 'eval_metric', '') else 'max'
+        lr_scheduler = ReduceLROnPlateau(
+            optimizer,
+            factor=args.factor_scheduler,
+            patience=args.patience_scheduler,
+            min_lr=args.min_lr,
+            mode=mode,
+            cooldown=0
+        )
+
+    return lr_scheduler, num_epochs
