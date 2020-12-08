@@ -147,6 +147,8 @@ parser.add_argument('--patience', default=10, type=int,
                     help='Patience for early stopping (default: 10)')
 parser.add_argument('--save-n-best', default=5, type=int,
                     help='N best epochs to save (default: 5)')
+parser.add_argument('--dice-mode', default='binary', type=str,
+                    help='DICE mode for loss and callback: binary, multiclass, multilabel (default: binary)')
 
 
 def _parse_args():
