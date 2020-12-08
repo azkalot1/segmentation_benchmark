@@ -57,6 +57,10 @@ parser.add_argument('-b', '--batch-size', type=int, default=32, metavar='N',
                     help='input batch size for training (default: 32)')
 parser.add_argument('-vb', '--validation-batch-size-multiplier', type=int, default=1, metavar='N',
                     help='ratio of validation batch size to training batch size (default: 1)')
+parser.add_argument('--class-names',
+                    default=None,
+                    type=str,
+                    help='Class names')
 # Criterion parametrs
 parser.add_argument('--criterion', default='dice_bce', type=str,
                     help='Criterion (default: DICE + BCE)')
