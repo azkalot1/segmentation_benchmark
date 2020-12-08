@@ -59,9 +59,8 @@ class ChestXRayDataset(Dataset):
         """
         sample_image = imread(self.images[idx])
         if len(sample_image.shape) == 3:
-            sample_image = sample_image[..., 0] / 255
-        else:
-            sample_image = np.expand_dims(sample_image, 2) / 255
+            sample_image = sample_image[..., 0]
+        sample_image = np.expand_dims(sample_image, 2) / 255
         sample_mask = imread(self.masks[idx]) / 255
         augmented = self.transforms(image=sample_image, mask=sample_mask)
         sample_image = augmented['image']
