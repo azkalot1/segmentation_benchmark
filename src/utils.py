@@ -168,7 +168,9 @@ def create_criterion(args):
         if criterion_name == 'ce':
             return nn.CrossEntropyLoss()
         elif criterion_name == 'dice':
-            return DiceLoss(mode='multiclass')
+            return DiceLoss(mode=args.dice_mode)
+        elif criterion_name == 'bce':
+            return nn.BCEWithLogitsLoss()
         else:
             raise NotImplementedError
 
@@ -182,7 +184,7 @@ def create_criterion(args):
 def create_callbacks(args, criterion_names):
     callbacks = [
         IoUMetricsCallback(
-            mode='multiclass',
+            mode=args.dice_mode,
             input_key=args.input_target_key,
             class_names=args.class_names.split(',') if args.class_names else None
         ),

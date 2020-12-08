@@ -18,10 +18,11 @@ import torch
 
 from timm.utils import setup_default_logging
 from src.utils import create_model, create_optimizer, create_criterion, create_callbacks, create_scheduler, get_outdir
-from src.augmentations import get_training_trasnforms, get_valid_transforms
-from src.datasets import PanNukeDataset
+from src.augmentations import get_training_trasnforms_xray, get_valid_transforms_xray
+from src.datasets import ChestXRayDataset
 from torch.utils.data import DataLoader
 from catalyst.dl import SupervisedRunner
+from sklearn.model_selection import train_test_split
 
 torch.backends.cudnn.benchmark = True
 _logger = logging.getLogger('train')
@@ -42,10 +43,12 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='Resume full model and optimizer state from checkpoint (default: none)')
 parser.add_argument('--no-resume-opt', action='store_true', default=False,
                     help='prevent resume of optimizer state when resuming model')
-parser.add_argument('--num-classes', type=int, default=6, metavar='N',
+parser.add_argument('--num-classes', type=int, default=1, metavar='N',
                     help='number of label classes (default: 6)')
-parser.add_argument('--data-folder', default='data/PanNuke', type=str,
-                    help='Path to data')
+parser.add_argument('--images-dir', default='data/ChestXray/images', type=str,
+                    help='Path to images')
+parser.add_argument('--masks-dir', default='data/ChestXray/masks', type=str,
+                    help='Path to masks')
 parser.add_argument('--train-fold', default='1', type=str,
                     help='train fold idx')
 parser.add_argument('--valid-fold', default='2', type=str,
@@ -54,13 +57,9 @@ parser.add_argument('-b', '--batch-size', type=int, default=32, metavar='N',
                     help='input batch size for training (default: 32)')
 parser.add_argument('-vb', '--validation-batch-size-multiplier', type=int, default=1, metavar='N',
                     help='ratio of validation batch size to training batch size (default: 1)')
-parser.add_argument('--class-names',
-                    default='neoplastic,non-neoplastic epithelial,inflammatory,connective,dead,background',
-                    type=str,
-                    help='Class names')
 # Criterion parametrs
-parser.add_argument('--criterion', default='dice_ce', type=str,
-                    help='Criterion (default: DICE + CE)')
+parser.add_argument('--criterion', default='dice_bce', type=str,
+                    help='Criterion (default: DICE + BCE)')
 # Optimizer parameters
 parser.add_argument('--opt', default='sgd', type=str, metavar='OPTIMIZER',
                     help='Optimizer (default: "sgd"')
@@ -148,8 +147,6 @@ parser.add_argument('--patience', default=10, type=int,
                     help='Patience for early stopping (default: 10)')
 parser.add_argument('--save-n-best', default=5, type=int,
                     help='N best epochs to save (default: 5)')
-parser.add_argument('--dice-mode', default='multiclass', type=str,
-                    help='DICE mode for loss and callback: binary, multiclass, multilabel (default: multiclass)')
 
 
 def _parse_args():
@@ -184,6 +181,7 @@ def main():
         args.encoder,
         pretrained=args.pretrained,
         num_classes=args.num_classes,
+        in_chans=1,
         checkpoint_path=args.initial_checkpoint)
 
     # prepare optimizer
@@ -194,21 +192,21 @@ def main():
     _logger.info('Scheduled epochs: {}'.format(num_epochs))
 
     # prepare dataset
-    folder = args.data_folder
-    train_fold = args.train_fold
-    images = np.load(f'{folder}/images/fold{train_fold}_images.npy')
-    masks = np.load(f'{folder}/masks/fold{train_fold}_masks.npy')
-    types = np.load(f'{folder}/types/fold{train_fold}_types.npy')
+    images = os.listdir(args.images_dir)
+    masks = np.array([args.masks_dir+image_path for image_path in images])
+    images = np.array([args.images_dir+image_path for image_path in images])
+    images_train, images_valid, masks_train, masks_valid = train_test_split(
+        images,
+        masks,
+        test_size=0.25,
+        random_state=42
+        )
 
-    valid_fold = args.valid_fold
-    images_val = np.load(f'{folder}/images/fold{valid_fold}_images.npy')
-    masks_val = np.load(f'{folder}/masks/fold{valid_fold}_masks.npy')
-    types_val = np.load(f'{folder}/types/fold{valid_fold}_types.npy')
     if args.no_aug:
-        train_dataset = PanNukeDataset(images, masks, types, get_valid_transforms())
+        train_dataset = ChestXRayDataset(images_train, masks_train, get_valid_transforms_xray())
     else:
-        train_dataset = PanNukeDataset(images, masks, types, get_training_trasnforms(args.aug_type))
-    val_dataset = PanNukeDataset(images_val, masks_val, types_val, get_valid_transforms())
+        train_dataset = ChestXRayDataset(images_train, masks_train, get_training_trasnforms_xray(args.aug_type))
+    val_dataset = ChestXRayDataset(images_valid, masks_valid, get_valid_transforms_xray())
 
     loaders = {
         'train': DataLoader(
@@ -229,6 +227,7 @@ def main():
     output_dir = ''
     output_base = args.output if args.output else './logs'
     exp_name = '-'.join([
+        'ChestXray',
         datetime.now().strftime("%Y%m%d-%H%M%S"),
         args.model,
         args.encoder,
